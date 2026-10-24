@@ -16,7 +16,8 @@ Estrutura de saída:
   },
   "dados_contexto_barril_do_petroleo": [
     {
-      "ano": "...",
+      "title": "E1",
+      "mes-ano": "10/1973",
       "evento": "...",
       "tipo": "...",
       "impacto_no_preco": "...",
@@ -60,7 +61,6 @@ HEADERS = {
 # Utilidades
 # --------------------------------------------------------------------------- #
 def normalizar_texto(txt: str) -> str:
-    """Colapsa espaços/quebras de linha e remove NBSP."""
     if txt is None:
         return ""
     txt = txt.replace("\xa0", " ")
@@ -70,7 +70,6 @@ def normalizar_texto(txt: str) -> str:
 
 
 def remover_acentos(txt: str) -> str:
-    """Remove acentos (para comparação de cabeçalhos)."""
     return "".join(
         c for c in unicodedata.normalize("NFD", txt)
         if unicodedata.category(c) != "Mn"
@@ -78,7 +77,6 @@ def remover_acentos(txt: str) -> str:
 
 
 def chave_cabecalho(txt: str) -> str:
-    """Normaliza o texto de cabeçalho para identificação robusta."""
     t = remover_acentos(normalizar_texto(txt))
     t = re.sub(r"[^a-z0-9 ]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
@@ -99,64 +97,76 @@ def baixar_pagina(url: str) -> str:
 # --------------------------------------------------------------------------- #
 # Parsing da tabela
 # --------------------------------------------------------------------------- #
-COLUNAS_ESPERADAS = ["ano", "evento", "tipo", "impacto no preco", "contexto"]
+COLUNAS_ESPERADAS = ["mes-ano", "evento", "tipo", "impacto no preco", "contexto"]
+
+# Aliases: cabeçalho HTML normalizado -> chave interna
+ALIASES_CABECALHO = {
+    "mes ano": "mes-ano",
+    "mes-ano": "mes-ano",
+    "ano": "mes-ano",           # compatibilidade retroativa
+    "evento": "evento",
+    "tipo": "tipo",
+    "impacto no preco": "impacto no preco",
+    "contexto": "contexto",
+}
+
 
 def mapear_colunas(cabecalhos):
-    """
-    A partir da lista de cabeçalhos (texto bruto), devolve dict
-    {indice_no_html: nome_normalizado_do_campo}.
-    """
     mapa = {}
     for idx, cab in enumerate(cabecalhos):
         chave = chave_cabecalho(cab)
-        if chave in COLUNAS_ESPERADAS:
-            mapa[idx] = chave
-        else:
-            # Tolerância: casamento por prefixo / contém
-            for esperado in COLUNAS_ESPERADAS:
-                if esperado in chave or chave in esperado:
-                    mapa[idx] = esperado
-                    break
+        if chave in ALIASES_CABECALHO:
+            mapa[idx] = ALIASES_CABECALHO[chave]
+            continue
+        for alias, campo in ALIASES_CABECALHO.items():
+            if alias in chave or chave in alias:
+                mapa[idx] = campo
+                break
     return mapa
 
 
 def extrair_tabela_eventos(html: str):
     soup = BeautifulSoup(html, "lxml")
 
-    # Seleciona todas as tabelas e escolhe a que possui as colunas esperadas
     melhor_tabela = None
     melhor_mapa = None
-    melhor_linhas = []
+    melhor_corpo = []
+    melhor_header_idx = None
 
     for tabela in soup.find_all("table"):
         linhas = tabela.find_all("tr")
         if not linhas:
             continue
 
-        # Cabeçalho (th ou primeira tr com tds)
-        cab_linha = tabela.find("tr")
-        cabecalhos = [c.get_text(" ", strip=True) for c in cab_linha.find_all(["th", "td"])]
-        mapa = mapear_colunas(cabecalhos)
+        # Procura a linha de cabeçalho em QUALQUER linha da tabela
+        # (o site não usa <thead>/<th> de forma consistente).
+        for h_idx, tr in enumerate(linhas):
+            celulas_cab = tr.find_all(["th", "td"])
+            if not celulas_cab:
+                continue
+            cabecalhos = [c.get_text(" ", strip=True) for c in celulas_cab]
+            mapa = mapear_colunas(cabecalhos)
+            if len(mapa) >= 4:
+                # Encontrou cabeçalho válido: dados são as linhas seguintes
+                corpo = linhas[h_idx + 1:]
+                if len(corpo) > len(melhor_corpo):
+                    melhor_tabela = tabela
+                    melhor_mapa = mapa
+                    melhor_corpo = corpo
+                    melhor_header_idx = h_idx
+                break  # já achou cabeçalho desta tabela
 
-        if len(mapa) >= 4:  # mínimo razoável
-            # Se a primeira linha era th, os dados vêm de linhas[1:]
-            # Se era td, os dados incluem a primeira linha.
-            tem_th = bool(cab_linha.find("th"))
-            corpo = linhas[1:] if tem_th else linhas
-
-            if len(corpo) > len(melhor_linhas):
-                melhor_tabela = tabela
-                melhor_mapa = mapa
-                melhor_linhas = corpo
-
-    if melhor_tabela is None:
+    if melhor_tabela is None or melhor_header_idx is None:
         raise RuntimeError(
             "Não foi possível localizar a tabela de eventos na página. "
             "Verifique a estrutura HTML do site."
         )
 
+    print(f"[DEBUG] Tabela escolhida: {len(melhor_corpo)} linha(s) de dados, "
+          f"cabeçalho na linha {melhor_header_idx}, mapa={melhor_mapa}")
+
     registros = []
-    for tr in melhor_linhas:
+    for tr in melhor_corpo:
         celulas = tr.find_all(["td", "th"])
         if not celulas:
             continue
@@ -169,15 +179,31 @@ def extrair_tabela_eventos(html: str):
                 registro[campo] = texto
 
         # Ignora linhas totalmente vazias
-        if any(registro.values()):
-            # Renomeia chaves para os nomes finais no JSON
-            registros.append({
-                "ano": registro.get("ano", ""),
-                "evento": registro.get("evento", ""),
-                "tipo": registro.get("tipo", ""),
-                "impacto_no_preco": registro.get("impacto no preco", ""),
-                "contexto": registro.get("contexto", ""),
-            })
+        if not any(registro.values()):
+            continue
+
+        registros.append({
+            "mes-ano": registro.get("mes-ano", ""),
+            "evento": registro.get("evento", ""),
+            "tipo": registro.get("tipo", ""),
+            "impacto_no_preco": registro.get("impacto no preco", ""),
+            "contexto": registro.get("contexto", ""),
+        })
+
+    # >>> AQUI está o campo "title": E1, E2, E3, ...
+    for i, reg in enumerate(registros, start=1):
+        reg["title"] = f"E{i}"
+
+    # Coloca "title" como PRIMEIRA chave de cada registro
+    registros = [
+        {"title": r["title"], **{k: v for k, v in r.items() if k != "title"}}
+        for r in registros
+    ]
+
+    print(f"[DEBUG] Total de registros com title: {len(registros)}")
+    if registros:
+        print(f"[DEBUG] Primeiro registro: {registros[0]}")
+        print(f"[DEBUG] Último registro:  {registros[-1]}")
 
     return registros
 
@@ -199,10 +225,8 @@ def montar_json(registros):
 def gravar_json(payload, pasta: str, arquivo: str) -> str:
     os.makedirs(pasta, exist_ok=True)
     caminho = os.path.join(pasta, arquivo)
-
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-
     print(f"[OK] Arquivo gerado: {caminho}")
     return caminho
 
@@ -223,7 +247,6 @@ def main() -> int:
             return 1
 
         print(f"[INFO] Registros extraídos: {len(registros)}")
-
         payload = montar_json(registros)
         gravar_json(payload, PASTA_SAIDA, ARQUIVO_SAIDA)
 
@@ -235,8 +258,7 @@ def main() -> int:
         return 3
 
     fim = datetime.now()
-    duracao = (fim - inicio).total_seconds()
-    print(f"[INFO] Concluído em {duracao:.2f}s")
+    print(f"[INFO] Concluído em {(fim - inicio).total_seconds():.2f}s")
     return 0
 
 
