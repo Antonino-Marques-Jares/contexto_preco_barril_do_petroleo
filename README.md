@@ -6,7 +6,7 @@ Informações de contexto relacionado ao aumento no preço do barril de petróle
 # Passo 1
 Clone o projeto execute 'pip install -r requirements.txt' para instalar as bibliotecas
 
-# Passo 1
+# Passo 2
 Adicione pasta etl no projeto github
 
 # Passo 3
