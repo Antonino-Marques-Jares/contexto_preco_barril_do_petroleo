@@ -16,9 +16,7 @@ O programa vai gerar arquivo json atualizado a partir da pagina
 https://www.areadetrampo.com.br/fatores-geopoliticos-e-o-preco-do-petroleo/
 
 # Passo 3
-Este json será também publicado em Área de Trampo.
-A finalidade é utiliza-lo para complementar gráficos relacionados a preço de derivados de petróleo ou a barril de petróleo.
-Ao publica-lo outros cientistas de dados também poderão utiliza-lo diretamente.
+O programa vai gerar o json na pasta etl
 
 # Passo 4
 Caso queira apenas acessar o json
